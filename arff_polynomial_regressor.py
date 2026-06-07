@@ -1,6 +1,3 @@
-#TODO - Input data sanity checks
-#TODO - Normalization
-#TODO - Negative powers
 #TODO - Option to split in several regressions for each nominal value combination
 #TODO - Export the model to a file and load it later for predictions
 
@@ -9,10 +6,23 @@ from scipy.io import arff
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.metrics import mean_squared_error, root_mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 import matplotlib.pyplot as plt
-
+#-------------------------------------------------------------------------
+def sanity_check(args):
+    original_df, meta = load_arff_to_dataframe(args.arff_file)
+    #Check that the target column exists
+    if args.target_attribute not in meta.names():
+        return f"Target attribute '{args.target_attribute}' not found in ARFF file. Available attributes: {meta.names()}"
+    #Check for zeros when using having negative powers
+    if args.max_negative_order > 0:
+        numeric_df, _, _ = separate_numeric_nominal_target(original_df, meta, args.target_attribute)
+        if (numeric_df == 0).any().any():
+            return "Negative powers are specified but there are zero values in the numeric features (produces division by zero). Please remove or handle zero values before using negative powers."
+        #Check for normalization when using negative powers
+        if args.normalize:
+            return "Negative powers can't be used with normalization (produces division by zero). Please disable normalization or negative powers."
 #-------------------------------------------------------------------------
 def load_arff_to_dataframe(file_path):
     '''Loads ARFF file and returns a DataFrame and metadata.
@@ -55,19 +65,27 @@ def normalize_numeric_features(numeric_df):
     norm_params = {col: {'min': numeric_df[col].min(), 'max': numeric_df[col].max()} for col in numeric_df.columns}
     return normalized_df, norm_params
 #-------------------------------------------------------------------------
-def create_polynomial_features(numeric_df, order):
+def create_polynomial_features(numeric_df, max_positive_order, max_negative_order):
     '''Creates polynomial features up to the specified order.
     inputs:
         numeric_df: DataFrame containing numeric columns
-        order: maximum order of polynomial features
+        max_positive_order: maximum positive order of polynomial features
+        max_negative_order: maximum negative order of polynomial features
     outputs:
         numeric_df: DataFrame containing polynomial features
     '''
+    new_numeric_df = pd.DataFrame()
     numeric_cols = numeric_df.columns
-    for p in range(2, order + 1):
+    for p in range(1, max_positive_order + 1):
         for col in numeric_cols:
-            numeric_df[f'{col}^{p}'] = numeric_df[col] ** p
-    return numeric_df
+            if p == 1:
+                new_numeric_df[col] = numeric_df[col]
+            else:
+                new_numeric_df[f'{col}^{p}'] = numeric_df[col] ** p
+    for n in range(1, max_negative_order + 1):
+        for col in numeric_cols:
+            new_numeric_df[f'{col}^(-{n})'] = numeric_df[col] ** (-n)
+    return new_numeric_df
 #-------------------------------------------------------------------------
 def one_hot_encode_nominal(nominal_df):
     '''Performs one-hot encoding on nominal columns.
@@ -76,23 +94,26 @@ def one_hot_encode_nominal(nominal_df):
     outputs:
         one_hot_df: DataFrame containing one-hot encoded columns
     '''
-    return pd.get_dummies(nominal_df, dtype=int)
+    return pd.get_dummies(nominal_df, dtype=int, drop_first=False)
 #-------------------------------------------------------------------------
-def preprocess_data(original_df, meta, target_col, order, normalize):
+def preprocess_data(original_df, meta, target_col, max_positive_order, max_negative_order, normalize):
     '''Preprocesses the data by separating numeric and nominal features, creating polynomial features, and one-hot encoding nominal features.
     inputs:
         original_df: DataFrame containing the data
         meta: metadata from the ARFF file
         target_col: name of the target column
-        order: maximum order of polynomial features
+        max_positive_order: maximum positive order of polynomial features
+        max_negative_order: maximum negative order of polynomial features
     outputs:
         processed_df: DataFrame containing the preprocessed data
     '''
     numeric_df, nominal_df, target_df = separate_numeric_nominal_target(original_df, meta, target_col)
     numeric_df, norm_data = normalize_numeric_features(numeric_df) if normalize else (numeric_df, None)
-    numeric_df = create_polynomial_features(numeric_df, order)
+    print(f'DEBUG - min/max normalized data:\n{numeric_df.describe().loc[["min", "max"]]}')
+    numeric_df = create_polynomial_features(numeric_df, max_positive_order, max_negative_order)
     one_hot_encoded = one_hot_encode_nominal(nominal_df)
     processed_df = pd.concat([numeric_df, one_hot_encoded, target_df], axis=1)
+    print(f'DEBUG - min/max all data:\n{processed_df.describe().loc[["min", "max"]]}')
     return processed_df, norm_data
 #-------------------------------------------------------------------------
 def train_and_evaluate_full_df(df, target_col):
@@ -109,11 +130,11 @@ def train_and_evaluate_full_df(df, target_col):
     model = LinearRegression()
     model.fit(X, y)
     predictions = model.predict(X)
-    mse = mean_squared_error(y, predictions)
+    rms = root_mean_squared_error(y, predictions)
     r2 = r2_score(y, predictions)
-    print(f"Mean Squared Error: {mse}")
+    print(f"Root Mean Squared Error: {rms}")
     print(f"R^2 Score: {r2}")
-    return model, mse, r2 
+    return model, rms, r2 
 #-------------------------------------------------------------------------
 def train_and_evaluate_single_line(df, target_col, test_index):
     '''Trains a linear regression model on all rows except the test row and evaluates it on the test row.
@@ -184,36 +205,61 @@ def generate_regression_equation(model, feature_names, target_col, norm_data):
             else:
                 equation += f"({name} / {max_val - min_val}))"
         else:
-            equation += f"({coef} * {name})"
+            equation += f" + ({coef} * {name})"
     return equation
 #-------------------------------------------------------------------------
-def test_polynomial_orders(df, meta, target_col, max_order, normalize):
+def test_polynomial_orders(df, meta, target_col, max_order, max_negative_order, normalize):
     '''Tests different polynomial orders and plots the mean squared error for each order.
     inputs:
         df: DataFrame containing the preprocessed data
         meta: metadata for the ARFF file
         target_col: name of the target column
         max_order: maximum polynomial order to test
+        max_negative_order: maximum negative polynomial order to test
+        normalize: whether to normalize numeric features
     outputs:
         None (plots the results)
     '''
-    orders = []
-    mse_values = []
-    for order in range(1, max_order + 1):
-        print(f"\nTesting Polynomial Order: {order}")
-        processed_df, norm_data = preprocess_data(df, meta, target_col, order, normalize)
-        #print(f"Processed DataFrame with Polynomial Order {order}:\n{processed_df.head()}")
-        actuals, predictions, errors = test_each_row(processed_df, target_col)
-        mse = mean_squared_error(actuals, predictions)
-        print(f"Mean Squared Error for Order {order}: {mse}")
-        orders.append(order)
-        mse_values.append(mse)
-    plt.plot(orders, mse_values, marker='o')
-    plt.xlabel('Polynomial Order')
-    plt.ylabel('Mean Squared Error')
-    plt.title('MSE vs Polynomial Order')
-    plt.xticks(orders)
-    plt.grid()
+    positive_orders = list(range(0, max_order + 1))
+    negative_orders = list(range(0, max_negative_order + 1))
+    mse_grid = np.zeros((len(negative_orders), len(positive_orders)))
+
+    for i, negative_order in enumerate(negative_orders):
+        for j, positive_order in enumerate(positive_orders):
+            if negative_order == 0:
+                print(f"\nTesting positive order={positive_order}, no negative powers")
+            else:
+                print(f"\nTesting positive order={positive_order}, negative order=-{negative_order}")
+            processed_df, norm_data = preprocess_data(df, meta, target_col, positive_order, negative_order, normalize)
+            actuals, predictions, errors = test_each_row(processed_df, target_col)
+            rms = root_mean_squared_error(actuals, predictions)
+            print(f"Root Mean Squared Error for pos={positive_order}, neg=-{negative_order}: {rms}")
+            mse_grid[i, j] = rms
+
+    print(f'DEBUG - MSE Grid:\n{mse_grid}')
+    if max_negative_order == 0:
+        print("\nNegative powers were not tested, only positive powers.")
+
+
+
+    #plot a 2D graph with x-axis as the positive order and y-axis as the negative order, and the color representing the MSE
+    fig, ax = plt.subplots()
+    im = ax.imshow(mse_grid, origin='lower', aspect='auto', cmap='viridis',
+                   extent=[positive_orders[0] - 0.5, positive_orders[-1] + 0.5,
+                           negative_orders[0] - 0.5, negative_orders[-1] + 0.5])
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label('Root Mean Squared Error')
+    ax.set_xlabel('Positive Order')
+    ax.set_ylabel('Negative Order')
+    ax.set_title('MSE vs Positive/Negative Polynomial Order')
+    ax.set_xticks(positive_orders)
+    ax.set_yticks(negative_orders)
+    ax.set_yticklabels(["0" if n == 0 else f"-{n}" for n in negative_orders])
+
+    for i, negative_order in enumerate(negative_orders):
+        for j, positive_order in enumerate(positive_orders):
+            ax.text(j, i, f"{mse_grid[i, j]:.3f}", ha='center', va='center', color='white', fontsize=8)
+
     plt.show()
 #-------------------------------------------------------------------------
 def parse_arguments():
@@ -227,19 +273,25 @@ def parse_arguments():
     parser.add_argument('-f', '--arff_file', required=True, help='Input ARFF file')
     parser.add_argument('-t', '--target_attribute', required=True, help='Attribute to be predicted')
     parser.add_argument('-m', '--mode', choices=['create_model', 'test_orders'], default='create_model', help='Operation mode')
-    parser.add_argument('-M', '--max_order', type=int, default=5, help='Max order for test_orders')
-    parser.add_argument('-n', '--normalize', action='store_true', help='Normalize numeric features')
+    parser.add_argument('-n', '--max_order', type=int, default=5, help='Max (positive) polynomial order')
+    parser.add_argument('-N', '--max_negative_order', type=int, default=0, help='Max (negative) polynomial order')
+    parser.add_argument('-r', '--normalize', action='store_true', help='Normalize numeric features')
     return parser.parse_args()
 #-------------------------------------------------------------------------
 def main():
     args = parse_arguments()
+
+    res = sanity_check(args)
+    if res:
+        print(res)
+        quit()
     original_df, meta = load_arff_to_dataframe(args.arff_file)
 
     if args.mode == 'test_orders':
-        test_polynomial_orders(original_df, meta, args.target_attribute, args.max_order, args.normalize)
+        test_polynomial_orders(original_df, meta, args.target_attribute, args.max_order, args.max_negative_order, args.normalize)
         return
 
-    processed_df, norm_data = preprocess_data(original_df, meta, args.target_attribute, args.max_order, args.normalize)
+    processed_df, norm_data = preprocess_data(original_df, meta, args.target_attribute, args.max_order, args.max_negative_order, args.normalize)
     actuals, predictions, errors = test_each_row(processed_df, args.target_attribute)
     print(f"Mean Absolute Error: {np.mean(errors)}")
 
