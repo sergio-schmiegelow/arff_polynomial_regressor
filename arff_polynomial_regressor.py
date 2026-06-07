@@ -108,13 +108,15 @@ def preprocess_data(original_df, meta, target_col, max_positive_order, max_negat
     outputs:
         processed_df: DataFrame containing the preprocessed data
     '''
+    if max_positive_order == 0 and max_negative_order == 0:
+        processed_df = original_df.copy()[[target_col]]
+        processed_df['filler_column'] = 1.0
+        return processed_df, None
     numeric_df, nominal_df, target_df = separate_numeric_nominal_target(original_df, meta, target_col)
     numeric_df, norm_data = normalize_numeric_features(numeric_df) if normalize else (numeric_df, None)
-    print(f'DEBUG - min/max normalized data:\n{numeric_df.describe().loc[["min", "max"]]}')
     numeric_df = create_polynomial_features(numeric_df, max_positive_order, max_negative_order)
     one_hot_encoded = one_hot_encode_nominal(nominal_df)
     processed_df = pd.concat([numeric_df, one_hot_encoded, target_df], axis=1)
-    print(f'DEBUG - min/max all data:\n{processed_df.describe().loc[["min", "max"]]}')
     return processed_df, norm_data
 #-------------------------------------------------------------------------
 def train_and_evaluate_full_df(df, target_col):
