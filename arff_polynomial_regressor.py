@@ -23,6 +23,7 @@ def sanity_check(args):
         #Check for normalization when using negative powers
         if args.normalize:
             return "Negative powers can't be used with normalization (produces division by zero). Please disable normalization or negative powers."
+    return None
 #-------------------------------------------------------------------------
 def load_arff_to_dataframe(file_path):
     '''Loads ARFF file and returns a DataFrame and metadata.
@@ -240,27 +241,23 @@ def test_polynomial_orders(df, meta, target_col, max_order, max_negative_order, 
     if max_negative_order == 0:
         print("\nNegative powers were not tested, only positive powers.")
 
-
-
-    #plot a 2D graph with x-axis as the positive order and y-axis as the negative order, and the color representing the MSE
-    fig, ax = plt.subplots()
-    im = ax.imshow(mse_grid, origin='lower', aspect='auto', cmap='viridis',
-                   extent=[positive_orders[0] - 0.5, positive_orders[-1] + 0.5,
-                           negative_orders[0] - 0.5, negative_orders[-1] + 0.5])
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label('Root Mean Squared Error')
-    ax.set_xlabel('Positive Order')
-    ax.set_ylabel('Negative Order')
-    ax.set_title('MSE vs Positive/Negative Polynomial Order')
-    ax.set_xticks(positive_orders)
-    ax.set_yticks(negative_orders)
-    ax.set_yticklabels(["0" if n == 0 else f"-{n}" for n in negative_orders])
-
+    #plot a multiple line graph with x-axis as the positive order and y-axis as the MSE, with a different line for each negative order
+    plt.figure()
     for i, negative_order in enumerate(negative_orders):
-        for j, positive_order in enumerate(positive_orders):
-            ax.text(j, i, f"{mse_grid[i, j]:.3f}", ha='center', va='center', color='white', fontsize=8)
-
+        if max_negative_order > 0:
+            label = f"Negative order = -{negative_order}" if negative_order > 0 else "No negative powers"
+        else:
+            label = "root mean squared error"
+        plt.plot(positive_orders, mse_grid[i, :], marker='o', label=label)
+    plt.xlabel('Positive Polynomial Order')
+    plt.ylabel('Root Mean Squared Error')
+    plt.title('RMSE vs Polynomial Order')
+    plt.xticks(positive_orders)
+    plt.legend()
+    plt.grid()
     plt.show()
+    
+    return
 #-------------------------------------------------------------------------
 def parse_arguments():
     '''Parses command-line arguments for the script.
